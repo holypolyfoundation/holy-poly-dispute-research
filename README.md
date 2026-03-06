@@ -19,6 +19,15 @@ Static reporter for **active Polymarket markets in UMA dispute**. The script per
 - Avoid noise by keeping state and only sending when something new appears.
 - Provide quick context (volume + tags) for triage.
 
+## Dependencies
+- **Python 3.9+** (or 3.7+; 3.9 recommended).
+- **No pip packages.** The script uses only the standard library (`json`, `urllib`, `dataclasses`, `datetime`, `typing`, etc.), so you do not need to install anything with pip or create a virtualenv.
+
+To check your version:
+```bash
+python3 --version
+```
+
 ## Files
 - `poly_dispute_report.py` — main script
 - `state/state.json` — persisted list of already‑seen market URLs and latest run info
