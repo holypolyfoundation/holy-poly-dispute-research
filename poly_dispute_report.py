@@ -470,9 +470,17 @@ def main() -> int:
     return 0
 
 
+ERROR_MESSAGE = "Last research ended with an error 😰"
+
+
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as e:
         print(f"[fatal] {e}", file=sys.stderr)
+        try:
+            cfg = load_config()
+            telegram_send_message(cfg, ERROR_MESSAGE)
+        except Exception:
+            pass
         raise
