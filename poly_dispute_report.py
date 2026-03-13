@@ -42,6 +42,9 @@ MARKET_BASE = "https://polymarket.com/market/"
 
 BOOL_TRUE_VALUES = ("1", "true", "yes", "y", "on")
 
+# Telegram sendMessage limit (bytes/characters for UTF-8 text)
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
 
 # -----------------------------------------------------------------------------
 # Config
@@ -343,6 +346,27 @@ def chunked(xs: List[Any], n: int) -> Iterable[List[Any]]:
 # -----------------------------------------------------------------------------
 
 
+def _split_message_for_telegram(text: str, max_len: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> List[str]:
+    """Split text into chunks of at most max_len chars, preferring newline boundaries."""
+    if len(text) <= max_len:
+        return [text] if text else []
+    chunks: List[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= max_len:
+            chunks.append(rest)
+            break
+        block = rest[:max_len]
+        last_nl = block.rfind("\n")
+        if last_nl > max_len // 2:
+            chunks.append(rest[: last_nl + 1].rstrip())
+            rest = rest[last_nl + 1 :].lstrip("\n")
+        else:
+            chunks.append(block)
+            rest = rest[max_len:]
+    return chunks
+
+
 def telegram_send_message(cfg: Config, text: str) -> None:
     if cfg.dry_run:
         # For manual runs / debugging: print would-be message and don't send anything.
@@ -351,15 +375,19 @@ def telegram_send_message(cfg: Config, text: str) -> None:
         print("\n--- /MESSAGE (dry-run) ---\n")
         return
     url = f"https://api.telegram.org/bot{cfg.token}/sendMessage"
-    payload = {
-        "chat_id": cfg.chat_id,
-        "text": text,
-        "disable_web_page_preview": "true",
-        "parse_mode": "HTML",
-    }
-    r = http_post_form(url, payload)
-    if not (isinstance(r, dict) and r.get("ok") is True):
-        raise RuntimeError(f"Telegram send failed: {r}")
+    for part in _split_message_for_telegram(text):
+        if not part:
+            continue
+        payload = {
+            "chat_id": cfg.chat_id,
+            "text": part,
+            "disable_web_page_preview": "true",
+            "parse_mode": "HTML",
+        }
+        r = http_post_form(url, payload)
+        if not (isinstance(r, dict) and r.get("ok") is True):
+            raise RuntimeError(f"Telegram send failed: {r}")
+        time.sleep(0.3)
 
 
 # -----------------------------------------------------------------------------
