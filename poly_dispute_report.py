@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """poly-dispute-research: static reporter
 
-Fetches Polymarket Gamma markets (closed=false), filters for UMA disputed markets with volume24hr > threshold,
-keeps a local state of seen market URLs, and posts ONLY newly-seen markets to a Telegram channel.
+Fetches Polymarket Gamma events (GET /events, closed=false), keeps only events whose markets include
+UMA disputed markets; skips events whose full JSON payload contains any blacklist keyword as whole word (case-sensitive).
 
 Designed to run under systemd timer every 3 hours.
 
@@ -12,6 +12,7 @@ Env vars (preferred):
   LIMIT                default 500
   STATE_PATH           default ./state.json
   MAX_PER_MESSAGE      default 30
+  BLACKLIST_KEYWORDS   comma-separated whole-word keywords; event is skipped if its JSON contains any (case-sensitive)
 
 Notes:
 - Writes state atomically (tmp + rename).
@@ -58,6 +59,7 @@ class Config:
     limit: int
     state_path: str
     max_per_message: int
+    blacklist_keywords: List[str]
     debug: bool
     dry_run: bool
 
@@ -92,6 +94,8 @@ def load_config() -> Config:
     limit = int(os.getenv("LIMIT", "500"))
     state_path = os.getenv("STATE_PATH", os.path.join(os.path.dirname(__file__), "state", "state.json"))
     max_per_message = int(os.getenv("MAX_PER_MESSAGE", "30"))
+    raw = (os.getenv("BLACKLIST_KEYWORDS") or "").strip()
+    blacklist_keywords = [x.strip() for x in raw.split(",") if x.strip()]
     debug = _parse_bool_env("DEBUG")
     dry_run = _parse_bool_env("DRY_RUN")
 
@@ -106,6 +110,7 @@ def load_config() -> Config:
         limit=limit,
         state_path=state_path,
         max_per_message=max_per_message,
+        blacklist_keywords=blacklist_keywords,
         debug=debug,
         dry_run=dry_run,
     )
@@ -124,29 +129,25 @@ def http_get_json(url: str, headers: Dict[str, str] | None = None, timeout: int 
 
 
 # -----------------------------------------------------------------------------
-# Gamma API / market parsing
+# Gamma API / events and market parsing
 # -----------------------------------------------------------------------------
 
 
-def extract_event_slug(m: Dict[str, Any]) -> str | None:
-    evs = m.get("events")
-    if isinstance(evs, list) and evs:
-        e0 = evs[0]
-        if isinstance(e0, dict):
-            s = e0.get("slug")
-            return s if isinstance(s, str) and s else None
-    return None
+def event_contains_blacklist_word(event: Dict[str, Any], keywords: List[str]) -> bool:
+    """True if event JSON contains any keyword as whole word (case-sensitive)."""
+    if not keywords:
+        return False
+    body = json.dumps(event)
+    for kw in keywords:
+        if not kw:
+            continue
+        if re.search(r"\b" + re.escape(kw) + r"\b", body):
+            return True
+    return False
 
 
-def fetch_event_tags(event_slug: str) -> List[str]:
-    url = f"{GAMMA_BASE}/events?{urllib.parse.urlencode({'slug': event_slug})}"
-    data = http_get_json(url)
-    if not (isinstance(data, list) and data):
-        return []
-    e = data[0]
-    if not isinstance(e, dict):
-        return []
-    tags = e.get("tags")
+def event_tags_to_display_list(tags: Any) -> List[str]:
+    """From Event.tags (list of Tag), return slug or label for display, dedup."""
     if not isinstance(tags, list):
         return []
     out: List[str] = []
@@ -159,8 +160,7 @@ def fetch_event_tags(event_slug: str) -> List[str]:
             out.append(slug)
         elif isinstance(label, str) and label:
             out.append(label)
-    # dedup preserve order
-    seen = set()
+    seen: set[str] = set()
     dedup: List[str] = []
     for x in out:
         if x in seen:
@@ -242,42 +242,43 @@ def html_escape(s: str) -> str:
 
 
 def fetch_all_disputed(cfg: Config) -> List[DisputedMarket]:
+    """Fetch via GET /events, then collect disputed markets from event.markets; skip events with blacklist keywords."""
     out: List[DisputedMarket] = []
     offset = 0
-    tags_cache: Dict[str, List[str]] = {}
 
     while True:
         params = {"closed": "false", "limit": str(cfg.limit), "offset": str(offset)}
-        page = http_get_json(f"{GAMMA_BASE}/markets?{urllib.parse.urlencode(params)}")
+        page = http_get_json(f"{GAMMA_BASE}/events?{urllib.parse.urlencode(params)}")
         if not isinstance(page, list):
-            raise RuntimeError("Gamma /markets returned non-list")
+            raise RuntimeError("Gamma /events returned non-list")
         if not page:
             break
 
-        for m in page:
-            if not isinstance(m, dict) or not is_disputed(m):
+        for ev in page:
+            if not isinstance(ev, dict):
                 continue
-            url = market_url(m)
-            if not url:
+            if event_contains_blacklist_word(ev, cfg.blacklist_keywords):
                 continue
-            event_slug = extract_event_slug(m)
-            if event_slug and event_slug in tags_cache:
-                tags = tags_cache[event_slug]
-            elif event_slug:
-                tags = fetch_event_tags(event_slug)
-                tags_cache[event_slug] = tags
-            else:
-                tags = []
-            out.append(
-                DisputedMarket(
-                    url=url,
-                    title=market_title(m),
-                    vol_24h=volume_num(m, "volume24hr"),
-                    vol_1wk=volume_num(m, "volume1wk"),
-                    vol_1mo=volume_num(m, "volume1mo"),
-                    tags=tags,
+            event_tags = event_tags_to_display_list(ev.get("tags"))
+            markets = ev.get("markets")
+            if not isinstance(markets, list):
+                continue
+            for m in markets:
+                if not isinstance(m, dict) or not is_disputed(m):
+                    continue
+                url = market_url(m)
+                if not url:
+                    continue
+                out.append(
+                    DisputedMarket(
+                        url=url,
+                        title=market_title(m),
+                        vol_24h=volume_num(m, "volume24hr"),
+                        vol_1wk=volume_num(m, "volume1wk"),
+                        vol_1mo=volume_num(m, "volume1mo"),
+                        tags=event_tags,
+                    )
                 )
-            )
 
         if len(page) < cfg.limit:
             break
