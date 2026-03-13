@@ -72,11 +72,11 @@ The script `install-systemd-timer.sh` installs a systemd **timer** that runs the
 ### Install
 From the project root:
 ```bash
-./install-systemd-timer.sh
+bash ./install-systemd-timer.sh
 ```
 Or with an explicit project path:
 ```bash
-./install-systemd-timer.sh /path/to/poly-dispute-research
+bash ./install-systemd-timer.sh /path/to/poly-dispute-research
 ```
 The script will:
 1. Resolve the project directory (script dir or the path you pass).
